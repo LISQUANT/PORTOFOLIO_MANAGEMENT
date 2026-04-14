@@ -1,0 +1,107 @@
+# HMM Regime Detection
+
+A Hidden Markov Model (HMM) pipeline that identifies the current market regime for any asset and runs a regime-based trading strategy backtest.
+
+---
+
+## How It Works
+
+The pipeline runs in 5 sequential steps:
+
+**1. Data Collection** (`data_handler.py`)
+Downloads historical close prices via `yfinance` and computes 3 features per asset: log returns, rolling volatility, and a z-score of price vs its rolling mean.
+
+**2. Feature Matrix** (`features.py`)
+Stacks the 3 features into a 2D array per ticker, drops NaN rows introduced by the rolling window, and standardizes everything to zero mean and unit variance.
+
+**3. Regime Detection** (`regime_detector.py`)
+Fits a Gaussian HMM with 3 hidden states to each ticker's feature matrix. Uses the Viterbi algorithm to decode the most likely regime sequence across the full history.
+
+**4. Regime Labeling** (`labler.py`)
+The HMM assigns states `0, 1, 2` arbitrarily — this step assigns meaning by inspecting the emission means the model learned per state:
+- Highest volatility mean → **High Volatility / Distressed**
+- Highest return mean (of the remaining) → **Trending / Momentum**
+- Whatever is left → **Mean-Reverting**
+
+**5. Visualization & Backtesting** (`visualizer.py`, `backtester.py`)
+Plots the close price colored by detected regime, and runs a regime-based strategy vs buy & hold with a full performance summary.
+
+---
+
+## Strategy Logic
+
+| Regime | Position |
+|---|---|
+| Trending / Momentum | Long |
+| Mean-Reverting | Flat |
+| High Volatility / Distressed | Short |
+
+---
+
+## Configuration
+
+All key settings live in `src/HHM/constants.py` — **this is the only file you need to edit to change the strategy behaviour**:
+
+```python
+# Position sizes per regime
+POSITION_MAP = {
+    "Trending / Momentum":          2.0,   # 200% long
+    "Mean-Reverting":               1.0,   # 100% long
+    "High Volatility / Distressed": -1.0,  # 100% short
+}
+
+# Chart colors per regime
+REGIME_COLORS = {
+    "Trending / Momentum":          "#2ecc71",
+    "Mean-Reverting":               "#3498db",
+    "High Volatility / Distressed": "#e74c3c",
+}
+
+DEFAULT_ROLLING_WINDOW  = 20      # lookback window for features (days)
+DEFAULT_INITIAL_CAPITAL = 100_000 # starting capital for the backtest
+DEFAULT_START_DATE      = "2020-01-01"
+DEFAULT_N_STATES        = 3       # number of HMM hidden states
+DEFAULT_N_ITER          = 1000    # HMM training iterations
+```
+
+---
+
+## Usage
+
+```python
+from src.get_data.data_handler import DataHandler
+from src.HHM.features import FeatureMatrix
+from src.HHM.regime_detector import RegimeDetector
+from src.HHM.labler import RegimeLabeler
+from src.HHM.visualizer import RegimeVisualizer
+from src.HHM.backtester import Backtester
+
+portfolio = {"AAPL": None, "AMZN": None, "MSFT": None}
+
+data     = DataHandler(tickers=portfolio)
+features = FeatureMatrix(data_handler=data)
+detector = RegimeDetector(feature_matrix=features)
+labeler  = RegimeLabeler(detector=detector, feature_matrix=features)
+
+# Visualize regimes
+viz = RegimeVisualizer(data, features, detector, labeler)
+viz.plot("AAPL")
+
+# Run backtest
+bt = Backtester(data, features, detector, labeler)
+bt.summary("AAPL")
+bt.plot("AAPL")
+```
+
+---
+
+## Dependencies
+
+```
+yfinance
+hmmlearn
+scikit-learn
+matplotlib
+numpy
+pandas
+```
