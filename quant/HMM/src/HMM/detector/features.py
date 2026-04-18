@@ -13,7 +13,7 @@ class FeatureMatrix:
         For each ticker, stack its 3 features into a 2D array of shape
         (n_timesteps, n_features), drop NaNs, and standardize.
         """
-        feature_matrix = {}
+        feature_matrix = {} #joao: for current use case dict is fine but if we scale it becomes a problem since it is not memory optimized, a better option would be a standard list or a nparray
 
         for ticker in self.tickers:
             raw = self._stack_features(data_handler, ticker)
