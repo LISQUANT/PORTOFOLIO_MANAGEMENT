@@ -7,6 +7,7 @@ class RegimeDetector:
     def __init__(self, feature_matrix: FeatureMatrix, n_states: int = DEFAULT_N_STATES, n_iter: int = DEFAULT_N_ITER):
         self.n_states = n_states
         self.n_iter = n_iter
+        self.scalers = feature_matrix.scalers # new addition for data pipeline
         self.tickers = feature_matrix.tickers
         self.models = self._fit_all(feature_matrix)
 
@@ -38,7 +39,8 @@ class RegimeDetector:
         Run the Viterbi algorithm to find the most likely state sequence.
         Returns an array of state labels (0, 1, 2) for each timestep.
         """
-        return self.models[ticker].predict(X)
+        X_preprocessed = self._preprocess(ticker, X) #joao: other change here, the data is now decoded using processed data and not raw
+        return self.models[ticker].predict(X_preprocessed)
 
     def current_regime(self, ticker: str, X: np.ndarray) -> int:
         """Return the regime label of the most recent timestep."""

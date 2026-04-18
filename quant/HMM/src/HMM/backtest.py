@@ -24,7 +24,7 @@ class Backtester:
         self.feature_matrix  = feature_matrix
         self.detector        = detector
         self.labeler         = labeler
-
+        
         self.initial_capital = DEFAULT_INITIAL_CAPITAL
         self.POSITION_MAP = POSITION_MAP
 
