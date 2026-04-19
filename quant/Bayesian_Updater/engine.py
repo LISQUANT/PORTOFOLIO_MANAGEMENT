@@ -94,8 +94,8 @@ class BayesianThesisUpdater:
         prev_mu, prev_sigma = self.posterior_mu, self.posterior_sigma
 
         new_mu, new_sigma = bayesian_update(
-            prior_mu    = prev_mu,
-            prior_sigma = prev_sigma,
+            prior_mu    = self.prior_mu,     
+            prior_sigma = self.prior_sigma,
             observed_x  = obs_x,
             sigma_L     = sigma_L,
         )
