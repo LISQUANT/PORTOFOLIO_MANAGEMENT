@@ -21,3 +21,5 @@ DEFAULT_INITIAL_CAPITAL = 100000
 DEFAULT_START_DATE      = "2020-01-01"
 DEFAULT_N_STATES        = 3
 DEFAULT_N_ITER          = 1000
+DEFAULT_TRAIN_SPLIT     = 0.6     # fraction of history used to fit the HMM (out-of-sample mode)
+DEFAULT_COST_BPS        = 5.0     # transaction cost in basis points per unit of position change

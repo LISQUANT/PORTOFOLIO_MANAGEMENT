@@ -1,0 +1,13 @@
+numpy
+pandas
+scipy
+yfinance
+matplotlib
+openpyxl
+fpdf2
+scikit-learn
+hmmlearn
+pytest
+
+# Optional — only needed on a machine with a Bloomberg terminal:
+# blpapi   (install from Bloomberg's index: pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/)

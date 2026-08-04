@@ -1,14 +1,27 @@
 """
 BayesianThesisUpdater — the main class that orchestrates all modules.
 
-  1. Calls prior.py      to initialise the prior
-  2. Calls data.py       to fetch implied vol
-  3. Calls metrics.py    to compute realised vol and scale sigma_L
-  4. Calls update.py     to run the Bayesian update
-  5. Calls metrics.py    again to compute P(target) and hurdle
-  6. Evaluates exit conditions
-  7. Returns an UpdateResult
+  1. Calls prior.py      to initialise the prior (annualised-drift space)
+  2. Calls metrics.py    to compute realised vol and the drift-observation noise
+  3. Calls update.py     to run the Bayesian update
+  4. Calls metrics.py    again to compute P(target) and hurdle
+  5. Evaluates exit conditions (horizon stop → probability floor → hurdle)
+  6. Returns an UpdateResult
 
+Model summary
+-------------
+Parameter: θ = annualised log drift of the position.
+Prior:     θ ~ N( log(target/entry)/T,  (IV/√T)² )
+Data:      observed drift  x_t/t  with noise  σ/√t   (x_t = cum. log-return)
+Each update starts from the ORIGINAL prior because the daily observations
+are overlapping cumulative returns — chaining posteriors would double-count
+the same price path many times over.
+
+Volatility source: realised vol (rolling) is preferred; if unavailable the
+fallback is override_iv → live IV (only if config.fetch_live_iv) → thesis IV.
+Live IV is never fetched during backtests unless explicitly enabled, both
+for speed and because fetching today's IV for a historical date would be
+look-ahead.
 """
 
 from __future__ import annotations
@@ -24,7 +37,7 @@ from .prior   import build_prior
 from .update  import bayesian_update
 from .metrics import (
     compute_realised_vol,
-    scale_sigma_L,
+    drift_observation_sigma,
     probability_reach_target,
     compute_hurdle,
 )
@@ -32,7 +45,7 @@ from .data    import get_implied_vol
 
 
 class BayesianThesisUpdater:
-    
+
     def __init__(
         self,
         params: ThesisParameters,
@@ -42,8 +55,8 @@ class BayesianThesisUpdater:
         self.config = config or ExitConfig()
 
         # Initialise prior — posterior starts equal to prior
-        self.prior_mu,    self.prior_sigma    = build_prior(params)
-        self.posterior_mu,  self.posterior_sigma = self.prior_mu, self.prior_sigma
+        self.prior_mu,     self.prior_sigma     = build_prior(params)
+        self.posterior_mu, self.posterior_sigma = self.prior_mu, self.prior_sigma
 
         self.history: list[UpdateResult] = []
 
@@ -68,42 +81,44 @@ class BayesianThesisUpdater:
         as_of:         Optional[date] = None,
         override_iv:   Optional[float] = None,
     ) -> UpdateResult:
-        
+
         as_of = as_of or date.today()
 
-        # ── 1. Observation ────────────────────────────────────────────────────
-        # Cumulative log-return from entry — lives in the same space as the prior
-        obs_x = float(np.log(current_price / self.params.entry_price))
+        # ── 1. Observation: annualised drift since entry ──────────────────────
+        t_elapsed = max(self._years_elapsed(as_of), 1 / 252)
+        obs_x     = float(np.log(current_price / self.params.entry_price))
+        obs_drift = obs_x / t_elapsed
 
-        # ── 2. Likelihood uncertainty — with correct time scaling ─────────────
+        # ── 2. Volatility: realised → override → live IV (opt-in) → thesis ────
         rv = compute_realised_vol(price_history, self.config.lookback_days)
 
-        iv = override_iv or get_implied_vol(
-            self.params.ticker, current_price, as_of, self.params.implied_vol
-        )
+        if np.isfinite(rv):
+            base_vol = rv
+        elif override_iv is not None and override_iv > 0:
+            base_vol = override_iv
+        elif self.config.fetch_live_iv:
+            base_vol = get_implied_vol(
+                self.params.ticker, current_price, as_of, self.params.implied_vol
+            )
+        else:
+            base_vol = self.params.implied_vol
 
-        # Use realised vol for base, fall back to IV, fall back to thesis IV
-        base_vol = rv if np.isfinite(rv) else iv
+        sigma_L = drift_observation_sigma(base_vol, t_elapsed)
 
-        # Scale sigma_L to match the cumulative-return observation (units fix)
-        t_elapsed = self._years_elapsed(as_of)
-        sigma_L   = scale_sigma_L(base_vol, t_elapsed)
-        sigma_L   = max(sigma_L, 0.01)    # numerical floor
-
-        # ── 3. Bayesian update (update.py) ────────────────────────────────────
+        # ── 3. Bayesian update (always from the original prior) ───────────────
         prev_mu, prev_sigma = self.posterior_mu, self.posterior_sigma
 
         new_mu, new_sigma = bayesian_update(
-            prior_mu    = self.prior_mu,     
+            prior_mu    = self.prior_mu,
             prior_sigma = self.prior_sigma,
-            observed_x  = obs_x,
+            observed_x  = obs_drift,
             sigma_L     = sigma_L,
         )
 
         self.posterior_mu    = new_mu
         self.posterior_sigma = new_sigma
 
-        # ── 4. Derived metrics (metrics.py) ───────────────────────────────────
+        # ── 4. Derived metrics ────────────────────────────────────────────────
         years_rem = self._years_remaining(as_of)
         days_held = self._days_held(as_of)
 
@@ -113,21 +128,27 @@ class BayesianThesisUpdater:
             posterior_mu    = new_mu,
             posterior_sigma = new_sigma,
             years_remaining = years_rem,
+            path_vol        = base_vol,
         )
 
-        # Annualised expected remaining return:
-        # posterior_mu is total log-return from entry
-        # subtract what is already realised → remaining log-return
-        remaining_logret = new_mu - obs_x
-        exp_ann_return   = (remaining_logret / years_rem) if years_rem > 1e-6 else 0.0
+        # Expected annualised remaining return = posterior drift.
+        # (The model's drift is constant, so the annualised expectation for
+        # the remaining period equals the posterior mean of θ.)
+        exp_ann_return = new_mu
 
         hurdle = compute_hurdle(self.params, self.config, rv)
 
-        # ── 5. Exit triggers ──────────────────────────────────────────────────
+        # ── 5. Exit triggers (horizon stop checked first, explicitly) ─────────
         exit_signal = False
         exit_reason = ""
 
-        if p_target < self.config.p_floor:
+        if years_rem <= 0:
+            exit_signal = True
+            exit_reason = (
+                f"Holding horizon reached ({self.params.holding_years:.2f}y) "
+                f"— thesis expired, re-underwrite or close"
+            )
+        elif p_target < self.config.p_floor:
             exit_signal = True
             exit_reason = (
                 f"P(reach target) = {p_target:.1%} "
@@ -200,8 +221,8 @@ class BayesianThesisUpdater:
             f"  Days Held           :  {r.days_held:>10d}\n"
             f"  Years Remaining     :  {r.years_remaining:>10.2f}\n"
             f"{'─'*60}\n"
-            f"  Prior   μ / σ       :  {r.prior_mu:+.4f}  /  {r.prior_sigma:.4f}\n"
-            f"  Post.   μ / σ       :  {r.posterior_mu:+.4f}  /  {r.posterior_sigma:.4f}\n"
+            f"  Prior   μ / σ  (ann):  {self.prior_mu:+.4f}  /  {self.prior_sigma:.4f}\n"
+            f"  Post.   μ / σ  (ann):  {r.posterior_mu:+.4f}  /  {r.posterior_sigma:.4f}\n"
             f"{'─'*60}\n"
             f"  P(reach target)     :  {r.probability_to_target:>8.1%}  "
             f"[floor: {c.p_floor:.0%}]\n"

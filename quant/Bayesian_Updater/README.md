@@ -62,48 +62,49 @@ print(engine.summary())
 
 ## The math
 
+The model parameter is **θ, the annualised log drift** of the position. All
+quantities (prior, observation, posterior) live in this one unit — that is
+what makes the Bayesian update valid.
+
 ### Prior
 
-The prior encodes the analyst's thesis as a Gaussian over the expected total
-log-return:
+The thesis says: total log-return over `T` years is `log(target/entry)`,
+with uncertainty `IV·√T`. Divide both by `T` to express it as an annual
+drift:
 
 ```
-μ₀ = log(target / entry)    ← centre on thesis return
-σ₀ = IV × √T               ← uncertainty driven by implied vol and horizon
+μ₀ = log(target / entry) / T    ← annual drift the thesis implies
+σ₀ = IV / √T                    ← thesis uncertainty in drift units
 ```
-
-`σ₀` uses `√T` because volatility scales with the square root of time — the
-longer the horizon, the wider the distribution, but it grows slower than
-linearly because random daily moves partially cancel each other out.
 
 ### Observation
 
-Every day the model observes the cumulative log-return from entry:
+Every day the model observes the annualised drift realised so far:
 
 ```
-x = log(current_price / entry_price)
+x = log(current_price / entry_price) / t_elapsed
 ```
 
-This is always measured from the same anchor point (entry). It is not a daily
-return — it is the total return so far.
+An on-track position shows `x ≈ μ₀` at every point in the holding period —
+the observation and the prior describe the same quantity, so comparing them
+is meaningful at any date. (The previous version compared the *cumulative*
+return so far against the *full-period* target return, which made every
+on-track position look like a failure.)
 
 ### Likelihood
 
-The noise on the observation is the realised volatility scaled to the elapsed
-time:
+The cumulative return satisfies `x_t ~ N(θ·t, σ²·t)`, so the drift estimate
+`x_t / t` has noise:
 
 ```
-σ_L = realised_vol × √t_elapsed
+σ_L = realised_vol / √t_elapsed
 ```
 
-This scaling is critical. The observation `x` has accumulated noise over
-`t_elapsed` years. A raw annual vol figure would over-estimate the noise early
-in the holding period and under-estimate it late. Scaling by `√t_elapsed`
-brings `σ_L` into the same units as `x`.
-
-**Why this matters:**
-- High realised vol → large `σ_L` → noisy observation → posterior barely moves → prior holds
-- Low realised vol → small `σ_L` → clean signal → posterior updates fast → exit fires
+**Why this matters:** early in the holding period `t` is small → `σ_L` is
+large → a few days of price action say almost nothing about the annual
+drift, so the prior dominates. As time passes the observation sharpens and
+the data progressively takes over. (Note the direction: information about
+the drift *accumulates* with time.)
 
 ### Bayesian update (conjugate Normal-Normal)
 
@@ -116,19 +117,36 @@ This is a precision-weighted average of two opinions: the prior (your thesis)
 and the data (what the market delivered). Precision = 1/σ². The tighter the
 distribution, the more it weighs in.
 
-The posterior is always narrower than both the prior and the likelihood —
-combining two uncertain sources always reduces total uncertainty.
+Each daily update starts from the **original prior**, not from yesterday's
+posterior: the daily observations are overlapping cumulative returns, so
+chaining posteriors would count the same price path many times over.
 
 ### Probability to target
 
+The remaining log-return over `T_rem` years combines drift uncertainty
+(which compounds linearly with time) and path noise (which compounds with
+√time):
+
 ```
-d = [ log(S_t / K) + μ · T_rem ] / (σ · √T_rem)
-P(S_T ≥ K) = Φ(d)
+R ~ N( μ_n · T_rem ,   σ_n²·T_rem²  +  σ_path²·T_rem )
+
+P(S_T ≥ K) = Φ( [ μ_n·T_rem − log(K / S_t) ] / √var(R) )
 ```
 
-This is the Black-Scholes d₂ formula. It assumes the stock price at the end
-of the remaining holding period follows a log-normal distribution with
-parameters from the posterior. `Φ` is the standard normal CDF.
+`σ_path` is the realised vol; `Φ` is the standard normal CDF.
+
+### Expected annualised remaining return
+
+Because the model's drift is constant, the annualised expected return for
+the remaining period is simply the posterior mean drift `μ_n`. This is what
+is compared against the hurdle.
+
+### Horizon stop
+
+When `years_remaining` reaches 0 the engine fires an **explicit** exit with
+reason "holding horizon reached" — the thesis has expired and must be
+re-underwritten or the position closed. (This used to happen by accident
+via a division-by-zero guard; it is now a deliberate third trigger.)
 
 ### Risk-adjusted hurdle
 
@@ -144,18 +162,23 @@ hurdle = risk_free_rate + sharpe_equiv × realised_vol
 
 ---
 
-## Bloomberg IV
+## Volatility source
 
-`data.py` contains a `blpapi` stub. When connected to a terminal, replace
-the `fetch_iv_bloomberg()` body with the live call (full instructions in
-`data.py` comments).
+The engine prefers **realised vol** (rolling window over `lookback_days`).
+Implied vol is only used as a fallback when there is not enough price
+history to compute realised vol:
 
-**Automatic fallback chain:**
 ```
-1. Bloomberg blpapi    ← live, most accurate
-2. yfinance ATM IV     ← free, options chain
-3. Thesis IV           ← Portfolio Team input, last resort
+1. Realised vol (rolling)      ← always preferred when available
+2. override_iv (per-call arg)  ← explicit caller override
+3. Live IV                     ← ONLY if ExitConfig.fetch_live_iv=True
+   (Bloomberg blpapi → yfinance ATM IV, see data.py)
+4. Thesis IV                   ← Portfolio Team input, last resort
 ```
+
+`fetch_live_iv` defaults to `False`: live IV on historical dates would be
+look-ahead in a backtest, and one network round-trip per ticker per day is
+slow. Enable it only for live daily monitoring.
 
 ---
 
@@ -240,10 +263,10 @@ trading day and these columns:
 | Column | Description |
 |---|---|
 | `current_price` | Daily close price |
-| `posterior_mu` | Updated posterior mean |
-| `posterior_sigma` | Updated posterior std |
+| `posterior_mu` | Updated posterior mean (annualised drift) |
+| `posterior_sigma` | Updated posterior std (annualised drift) |
 | `probability_to_target` | P(S_T ≥ target) |
-| `expected_return_ann` | Annualised expected remaining return |
+| `expected_return_ann` | Annualised expected remaining return (= posterior drift) |
 | `risk_adjusted_hurdle` | Hurdle rate that day |
 | `exit_signal` | True if either trigger fired |
 | `exit_reason` | String describing which trigger fired |

@@ -4,7 +4,7 @@ Package structure
   config.py   — ThesisParameters, ExitConfig, UpdateResult  
   prior.py    — build_prior()                                
   update.py   — bayesian_update()                            
-  metrics.py  — realised_vol, scale_sigma_L,                 
+  metrics.py  — realised_vol, drift_observation_sigma,
                 probability_reach_target, compute_hurdle
   data.py     — Bloomberg stub, yfinance fallback,           
                 get_implied_vol()
@@ -16,7 +16,7 @@ from .prior   import build_prior
 from .update  import bayesian_update
 from .metrics import (
     compute_realised_vol,
-    scale_sigma_L,
+    drift_observation_sigma,
     probability_reach_target,
     compute_hurdle,
 )
@@ -30,7 +30,7 @@ __all__ = [
     "build_prior",
     "bayesian_update",
     "compute_realised_vol",
-    "scale_sigma_L",
+    "drift_observation_sigma",
     "probability_reach_target",
     "compute_hurdle",
     "get_implied_vol",

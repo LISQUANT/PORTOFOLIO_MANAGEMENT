@@ -32,11 +32,16 @@ class ExitConfig:
     sharpe_equiv    : If set: hurdle = rf + sharpe_equiv * vol
                       Overrides hurdle_premium when provided.
     lookback_days   : Rolling window for realised vol             (default 30)
+    fetch_live_iv   : If True, fetch live IV (Bloomberg/yfinance) when
+                      realised vol is unavailable. Keep False for backtests:
+                      live IV on historical dates is look-ahead, and the
+                      network calls are slow. (default False)
     """
     p_floor:        float           = 0.30
     hurdle_premium: float           = 0.07
     sharpe_equiv:   Optional[float] = None
     lookback_days:  int             = 30
+    fetch_live_iv:  bool            = False
 
 
 @dataclass
@@ -46,11 +51,11 @@ class UpdateResult:
     ticker:                str
     current_price:         float
 
-    # Prior state at this step (before update)
+    # Prior state at this step (before update) — annualised drift units
     prior_mu:              float
     prior_sigma:           float
 
-    # Posterior state (after update)
+    # Posterior state (after update) — annualised drift units
     posterior_mu:          float
     posterior_sigma:       float
 

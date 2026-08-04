@@ -7,7 +7,7 @@ class RegimeDetector:
     def __init__(self, feature_matrix: FeatureMatrix, n_states: int = DEFAULT_N_STATES, n_iter: int = DEFAULT_N_ITER):
         self.n_states = n_states
         self.n_iter = n_iter
-        self.scalers = feature_matrix.scalers # new addition for data pipeline
+        self.scalers = feature_matrix.scalers   # fitted per-ticker scalers, for raw inputs
         self.tickers = feature_matrix.tickers
         self.models = self._fit_all(feature_matrix)
 
@@ -30,17 +30,28 @@ class RegimeDetector:
             n_iter=self.n_iter,
             random_state=42
         )
-        #This is the learning phase. The HMM looks at your log returns, volatility, and z-scores to find patterns.
         model.fit(X)
         return model
 
     def decode(self, ticker: str, X: np.ndarray) -> np.ndarray:
         """
         Run the Viterbi algorithm to find the most likely state sequence.
+        X must already be standardized (i.e. FeatureMatrix.features[ticker]).
         Returns an array of state labels (0, 1, 2) for each timestep.
+
+        NOTE: Viterbi over the full history uses future observations to
+        refine past states — fine for descriptive analysis / visualization,
+        but NOT causal. For backtesting use Backtester's out-of-sample mode.
         """
-        X_preprocessed = self._preprocess(ticker, X) #joao: other change here, the data is now decoded using processed data and not raw
-        return self.models[ticker].predict(X_preprocessed)
+        return self.models[ticker].predict(X)
+
+    def decode_raw(self, ticker: str, raw: np.ndarray) -> np.ndarray:
+        """
+        Decode UN-standardized feature rows (e.g. freshly computed live
+        features) by first applying the scaler fitted on the training data.
+        """
+        X = self.scalers[ticker].transform(raw)
+        return self.decode(ticker, X)
 
     def current_regime(self, ticker: str, X: np.ndarray) -> int:
         """Return the regime label of the most recent timestep."""

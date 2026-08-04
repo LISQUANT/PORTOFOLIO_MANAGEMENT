@@ -8,60 +8,80 @@ A Hidden Markov Model (HMM) pipeline that identifies the current market regime f
 
 The pipeline runs in 5 sequential steps:
 
-**1. Data Collection** (`data_handler.py`)
+**1. Data Collection** (`src/get_data/data_handler.py`)
 Downloads historical close prices via `yfinance` and computes 3 features per asset: log returns, rolling volatility, and a z-score of price vs its rolling mean.
 
-**2. Feature Matrix** (`features.py`)
-Stacks the 3 features into a 2D array per ticker, drops NaN rows introduced by the rolling window, and standardizes everything to zero mean and unit variance.
+**2. Feature Matrix** (`src/HMM/detector/features.py`)
+Stacks the 3 features into a 2D array per ticker, drops NaN rows introduced by the rolling window, and standardizes everything to zero mean and unit variance. The fitted `StandardScaler` per ticker is kept so new raw observations can be transformed identically at inference time.
 
-**3. Regime Detection** (`regime_detector.py`)
-Fits a Gaussian HMM with 3 hidden states to each ticker's feature matrix. Uses the Viterbi algorithm to decode the most likely regime sequence across the full history.
+**3. Regime Detection** (`src/HMM/detector/regime_detector.py`)
+Fits a Gaussian HMM with 3 hidden states to each ticker's feature matrix. `decode()` runs Viterbi over the full history (descriptive, non-causal); `decode_raw()` accepts un-standardized rows and applies the stored scaler first.
 
-**4. Regime Labeling** (`labler.py`)
+**4. Regime Labeling** (`src/HMM/detector/labler.py`)
 The HMM assigns states `0, 1, 2` arbitrarily — this step assigns meaning by inspecting the emission means the model learned per state:
 - Highest volatility mean → **High Volatility / Distressed**
 - Highest return mean (of the remaining) → **Trending / Momentum**
 - Whatever is left → **Mean-Reverting**
 
-**5. Visualization & Backtesting** (`visualizer.py`, `backtester.py`)
+**5. Visualization & Backtesting** (`src/HMM/visual/regime_visual.py`, `src/HMM/backtest.py`)
 Plots the close price colored by detected regime, and runs a regime-based strategy vs buy & hold with a full performance summary.
+
+---
+
+## Backtest validity — read this
+
+The backtester has two modes:
+
+- **`out_of_sample=True` (default).** The HMM is fitted only on the first
+  `DEFAULT_TRAIN_SPLIT` fraction of history, and each test day is decoded
+  causally (Viterbi over data up to that day only). This is the only mode
+  whose numbers are indicative of live behaviour.
+- **`out_of_sample=False`.** Full-history fit + full-sequence Viterbi. Both
+  steps see the future; results are optimistic by construction. Use only
+  for descriptive analysis.
+
+Positions are applied with a one-day lag (regime known at end of day t
+drives the return from t to t+1), leverage is applied to **simple** returns,
+and `DEFAULT_COST_BPS` transaction costs are charged on position changes.
 
 ---
 
 ## Strategy Logic
 
+Position sizes come from `POSITION_MAP` in `src/HMM/constants.py` (the values below are the current defaults):
+
 | Regime | Position |
 |---|---|
-| Trending / Momentum | Long |
-| Mean-Reverting | Flat |
-| High Volatility / Distressed | Short |
+| Trending / Momentum | 2.0 (200% long) |
+| Mean-Reverting | 1.0 (100% long) |
+| High Volatility / Distressed | -0.3 (30% short) |
 
 ---
 
 ## Configuration
 
-All key settings live in `src/HHM/constants.py` — **this is the only file you need to edit to change the strategy behaviour**:
+All key settings live in `src/HMM/constants.py` — **this is the only file you need to edit to change the strategy behaviour**:
 
 ```python
-# Position sizes per regime
 POSITION_MAP = {
     "Trending / Momentum":          2.0,   # 200% long
     "Mean-Reverting":               1.0,   # 100% long
-    "High Volatility / Distressed": -1.0,  # 100% short
+    "High Volatility / Distressed": -0.3,  # 30% short
 }
 
-# Chart colors per regime
 REGIME_COLORS = {
     "Trending / Momentum":          "#2ecc71",
     "Mean-Reverting":               "#3498db",
     "High Volatility / Distressed": "#e74c3c",
 }
 
-DEFAULT_ROLLING_WINDOW  = 20      # lookback window for features (days)
+DEFAULT_ROLLING_WINDOW  = 60      # lookback window for features (days)
 DEFAULT_INITIAL_CAPITAL = 100_000 # starting capital for the backtest
 DEFAULT_START_DATE      = "2020-01-01"
 DEFAULT_N_STATES        = 3       # number of HMM hidden states
 DEFAULT_N_ITER          = 1000    # HMM training iterations
+DEFAULT_TRAIN_SPLIT     = 0.6     # train fraction for out-of-sample backtests
+DEFAULT_COST_BPS        = 5.0     # transaction cost per unit turnover
 ```
 
 ---
@@ -70,27 +90,30 @@ DEFAULT_N_ITER          = 1000    # HMM training iterations
 
 ```python
 from src.get_data.data_handler import DataHandler
-from src.HHM.features import FeatureMatrix
-from src.HHM.regime_detector import RegimeDetector
-from src.HHM.labler import RegimeLabeler
-from src.HHM.visualizer import RegimeVisualizer
-from src.HHM.backtester import Backtester
+from src.HMM.detector.features import FeatureMatrix
+from src.HMM.detector.regime_detector import RegimeDetector
+from src.HMM.detector.labler import RegimeLabeler
+from src.HMM.visual.regime_visual import RegimeVisualizer
+from src.HMM.backtest import Backtester
 
-portfolio = {"AAPL": None, "AMZN": None, "MSFT": None}
+portfolio = {"AAPL": 10, "AMZN": 5, "MSFT": 8}
 
 data     = DataHandler(tickers=portfolio)
 features = FeatureMatrix(data_handler=data)
 detector = RegimeDetector(feature_matrix=features)
 labeler  = RegimeLabeler(detector=detector, feature_matrix=features)
 
-# Visualize regimes
+# Visualize regimes (descriptive, in-sample)
 viz = RegimeVisualizer(data, features, detector, labeler)
 viz.plot("AAPL")
 
-# Run backtest
+# Run backtest (out-of-sample by default)
 bt = Backtester(data, features, detector, labeler)
 bt.summary("AAPL")
 bt.plot("AAPL")
+
+# In-sample (look-ahead) version, for comparison only:
+bt.summary("AAPL", out_of_sample=False)
 ```
 
 ---
